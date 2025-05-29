@@ -1,0 +1,291 @@
+// Human Following and Line Following Robot
+// Compatible with Arduino Uno/Nano with motor driver, ultrasonic sensor, and IR sensors
+
+#include <Servo.h>
+
+// Pin definitions
+// Motor pins (L298N motor driver)
+#define LEFT_MOTOR_PIN1 2
+#define LEFT_MOTOR_PIN2 3
+#define LEFT_MOTOR_PWM 5
+#define RIGHT_MOTOR_PIN1 4
+#define RIGHT_MOTOR_PIN2 7
+#define RIGHT_MOTOR_PWM 6
+
+// Ultrasonic sensor pins (HC-SR04)
+#define TRIG_PIN 8
+#define ECHO_PIN 9
+
+// IR sensor pins for line following
+#define LEFT_IR_PIN A0
+#define CENTER_IR_PIN A1
+#define RIGHT_IR_PIN A2
+
+// Mode selection pin
+#define MODE_SWITCH_PIN 10
+
+// Servo for ultrasonic scanner (optional)
+#define SERVO_PIN 11
+
+// Constants
+#define SAFE_DISTANCE 20        // Safe following distance in cm
+#define MAX_DISTANCE 50         // Maximum detection distance
+#define BASE_SPEED 150          // Base motor speed (0-255)
+#define TURN_SPEED 100          // Turning speed
+#define IR_THRESHOLD 500        // IR sensor threshold (adjust based on surface)
+
+// Global variables
+Servo scanServo;
+bool humanFollowMode = true;
+unsigned long lastScanTime = 0;
+int servoPos = 90;
+int servoDirection = 1;
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Motor pins
+  pinMode(LEFT_MOTOR_PIN1, OUTPUT);
+  pinMode(LEFT_MOTOR_PIN2, OUTPUT);
+  pinMode(LEFT_MOTOR_PWM, OUTPUT);
+  pinMode(RIGHT_MOTOR_PIN1, OUTPUT);
+  pinMode(RIGHT_MOTOR_PIN2, OUTPUT);
+  pinMode(RIGHT_MOTOR_PWM, OUTPUT);
+  
+  // Sensor pins
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(LEFT_IR_PIN, INPUT);
+  pinMode(CENTER_IR_PIN, INPUT);
+  pinMode(RIGHT_IR_PIN, INPUT);
+  pinMode(MODE_SWITCH_PIN, INPUT_PULLUP);
+  
+  // Servo setup
+  scanServo.attach(SERVO_PIN);
+  scanServo.write(90);
+  
+  Serial.println("Robot initialized. Ready to follow!");
+  delay(2000);
+}
+
+void loop() {
+  // Check mode switch
+  humanFollowMode = digitalRead(MODE_SWITCH_PIN);
+  
+  if (humanFollowMode) {
+    humanFollowingMode();
+  } else {
+    lineFollowingMode();
+  }
+  
+  delay(50); // Small delay for stability
+}
+
+// ========== HUMAN FOLLOWING FUNCTIONS ==========
+
+void humanFollowingMode() {
+  int distance = getDistance();
+  
+  if (distance > 0 && distance <= MAX_DISTANCE) {
+    if (distance < SAFE_DISTANCE - 5) {
+      // Too close - move backward
+      moveBackward(BASE_SPEED);
+      Serial.println("Moving backward - too close");
+    } 
+    else if (distance > SAFE_DISTANCE + 10) {
+      // Too far - move forward
+      moveForward(BASE_SPEED);
+      Serial.println("Moving forward - following");
+    } 
+    else {
+      // Perfect distance - stop
+      stopMotors();
+      Serial.println("Maintaining distance");
+    }
+  } else {
+    // No human detected - scan for human
+    scanForHuman();
+  }
+}
+
+void scanForHuman() {
+  // Move servo to scan area
+  if (millis() - lastScanTime > 100) {
+    servoPos += servoDirection * 10;
+    
+    if (servoPos >= 150) {
+      servoDirection = -1;
+    } else if (servoPos <= 30) {
+      servoDirection = 1;
+    }
+    
+    scanServo.write(servoPos);
+    lastScanTime = millis();
+    
+    int distance = getDistance();
+    if (distance > 0 && distance <= MAX_DISTANCE) {
+      // Human found - turn towards it
+      if (servoPos > 90) {
+        turnRight(TURN_SPEED);
+        Serial.println("Turning right to follow");
+      } else if (servoPos < 90) {
+        turnLeft(TURN_SPEED);
+        Serial.println("Turning left to follow");
+      }
+    } else {
+      stopMotors();
+    }
+  }
+}
+
+int getDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  int distance = duration * 0.034 / 2;
+  
+  return distance;
+}
+
+// ========== LINE FOLLOWING FUNCTIONS ==========
+
+void lineFollowingMode() {
+  int leftIR = analogRead(LEFT_IR_PIN);
+  int centerIR = analogRead(CENTER_IR_PIN);
+  int rightIR = analogRead(RIGHT_IR_PIN);
+  
+  // Convert to digital values (true = line detected)
+  bool leftLine = leftIR > IR_THRESHOLD;
+  bool centerLine = centerIR > IR_THRESHOLD;
+  bool rightLine = rightIR > IR_THRESHOLD;
+  
+  Serial.print("IR Sensors - L:");
+  Serial.print(leftLine);
+  Serial.print(" C:");
+  Serial.print(centerLine);
+  Serial.print(" R:");
+  Serial.println(rightLine);
+  
+  // Line following logic
+  if (centerLine && !leftLine && !rightLine) {
+    // Line in center - move forward
+    moveForward(BASE_SPEED);
+  }
+  else if (leftLine && !rightLine) {
+    // Line on left - turn left
+    turnLeft(TURN_SPEED);
+  }
+  else if (rightLine && !leftLine) {
+    // Line on right - turn right
+    turnRight(TURN_SPEED);
+  }
+  else if (leftLine && centerLine && !rightLine) {
+    // Sharp left turn
+    turnLeftSharp();
+  }
+  else if (rightLine && centerLine && !leftLine) {
+    // Sharp right turn
+    turnRightSharp();
+  }
+  else if (leftLine && rightLine && centerLine) {
+    // All sensors detect line - intersection or end
+    moveForward(BASE_SPEED / 2);
+  }
+  else if (!leftLine && !centerLine && !rightLine) {
+    // No line detected - stop or search
+    stopMotors();
+    searchForLine();
+  }
+}
+
+void searchForLine() {
+  // Simple line search - turn slightly left and right
+  static unsigned long searchStartTime = 0;
+  static bool searchingLeft = true;
+  
+  if (searchStartTime == 0) {
+    searchStartTime = millis();
+  }
+  
+  if (millis() - searchStartTime < 500) {
+    if (searchingLeft) {
+      turnLeft(TURN_SPEED / 2);
+    } else {
+      turnRight(TURN_SPEED / 2);
+    }
+  } else {
+    searchingLeft = !searchingLeft;
+    searchStartTime = millis();
+  }
+}
+
+// ========== MOTOR CONTROL FUNCTIONS ==========
+
+void moveForward(int speed) {
+  digitalWrite(LEFT_MOTOR_PIN1, HIGH);
+  digitalWrite(LEFT_MOTOR_PIN2, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN1, HIGH);
+  digitalWrite(RIGHT_MOTOR_PIN2, LOW);
+  analogWrite(LEFT_MOTOR_PWM, speed);
+  analogWrite(RIGHT_MOTOR_PWM, speed);
+}
+
+void moveBackward(int speed) {
+  digitalWrite(LEFT_MOTOR_PIN1, LOW);
+  digitalWrite(LEFT_MOTOR_PIN2, HIGH);
+  digitalWrite(RIGHT_MOTOR_PIN1, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN2, HIGH);
+  analogWrite(LEFT_MOTOR_PWM, speed);
+  analogWrite(RIGHT_MOTOR_PWM, speed);
+}
+
+void turnLeft(int speed) {
+  digitalWrite(LEFT_MOTOR_PIN1, LOW);
+  digitalWrite(LEFT_MOTOR_PIN2, HIGH);
+  digitalWrite(RIGHT_MOTOR_PIN1, HIGH);
+  digitalWrite(RIGHT_MOTOR_PIN2, LOW);
+  analogWrite(LEFT_MOTOR_PWM, speed);
+  analogWrite(RIGHT_MOTOR_PWM, speed);
+}
+
+void turnRight(int speed) {
+  digitalWrite(LEFT_MOTOR_PIN1, HIGH);
+  digitalWrite(LEFT_MOTOR_PIN2, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN1, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN2, HIGH);
+  analogWrite(LEFT_MOTOR_PWM, speed);
+  analogWrite(RIGHT_MOTOR_PWM, speed);
+}
+
+void turnLeftSharp() {
+  digitalWrite(LEFT_MOTOR_PIN1, LOW);
+  digitalWrite(LEFT_MOTOR_PIN2, HIGH);
+  digitalWrite(RIGHT_MOTOR_PIN1, HIGH);
+  digitalWrite(RIGHT_MOTOR_PIN2, LOW);
+  analogWrite(LEFT_MOTOR_PWM, BASE_SPEED);
+  analogWrite(RIGHT_MOTOR_PWM, BASE_SPEED);
+  delay(200);
+}
+
+void turnRightSharp() {
+  digitalWrite(LEFT_MOTOR_PIN1, HIGH);
+  digitalWrite(LEFT_MOTOR_PIN2, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN1, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN2, HIGH);
+  analogWrite(LEFT_MOTOR_PWM, BASE_SPEED);
+  analogWrite(RIGHT_MOTOR_PWM, BASE_SPEED);
+  delay(200);
+}
+
+void stopMotors() {
+  digitalWrite(LEFT_MOTOR_PIN1, LOW);
+  digitalWrite(LEFT_MOTOR_PIN2, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN1, LOW);
+  digitalWrite(RIGHT_MOTOR_PIN2, LOW);
+  analogWrite(LEFT_MOTOR_PWM, 0);
+  analogWrite(RIGHT_MOTOR_PWM, 0);
+}
