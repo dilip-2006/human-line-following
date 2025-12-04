@@ -63,7 +63,6 @@ Everything I have built since — AGVs, IK systems, UI-controlled arms, task-pla
 - PID-based speed correction
 - Mapping + localization
 - Full human-tracking with deep learning
-- ROS-based navigation stack
 
 ---
 
